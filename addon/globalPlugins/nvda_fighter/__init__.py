@@ -243,12 +243,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
                     if is_terminal:
                         now = time.monotonic()
-                        del timestamps[:[i for i, t in enumerate(timestamps) if now - t <= 0.5] or len(timestamps)]
-                        timestamps.append(now)
+                        # Prune events older than 0.5s cleanly
+                        self._terminal_event_timestamps = [t for t in self._terminal_event_timestamps if now - t <= 0.5]
+                        self._terminal_event_timestamps.append(now)
 
                         # If more than 5 terminal events arrive in 0.5s: DROP THEM!
-                        if len(timestamps) > 5:
-                            if len(timestamps) == 6:
+                        if len(self._terminal_event_timestamps) > 5:
+                            if len(self._terminal_event_timestamps) == 6:
                                 write_persistent_log(
                                     f"[GATEKEEPER] 🛡️ Terminal storm detected from {appName or wClass}! "
                                     "Disarming out-of-process COM calls to prevent freeze!"
