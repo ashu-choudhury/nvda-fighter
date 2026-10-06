@@ -1,0 +1,10 @@
+/target/
+*.nvda-addon
+addon/globalPlugins/nvda_fighter/lib/
+addon/globalPlugins/nvda_fighter/bin/
+addon/globalPlugins/nvda_fighter/*.dll
+addon/globalPlugins/nvda_fighter/*.exe
+*.pyc
+__pycache__/
+.vscode/
+.idea/

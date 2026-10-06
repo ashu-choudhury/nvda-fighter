@@ -1,0 +1,17 @@
+[package]
+name = "fighter_core"
+version = "1.0.0"
+edition = "2021"
+description = "RPG In-Process Guardian Shield & Win32 Armor for NVDA"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+] }

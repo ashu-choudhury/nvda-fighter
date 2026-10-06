@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/fighter_core",
+    "crates/fighter_daemon",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = "z"        # Optimize for size - absolute minimal memory footprint
+lto = true             # Link Time Optimization to purge unused code
+codegen-units = 1      # Max optimization
+panic = "abort"        # No stack unwinding overhead
+strip = true           # Strip debug symbols for featherweight binary
