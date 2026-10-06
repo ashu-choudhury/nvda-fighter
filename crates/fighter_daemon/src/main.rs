@@ -4,25 +4,28 @@
 //! 
 //! "I am the Shadow Beast that lurks in the background realm. I hold the life-thread
 //! of NVDA in my razor claws. If NVDA bids me farewell with honor, I sleep.
-//! BUT IF ANY COWARDLY VILLAIN CAUSES A COM COMA OR FREEZES NVDA FOR > 6 SECONDS,
+//! BUT IF ANY COWARDLY VILLAIN CAUSES A COM COMA OR FREEZES NVDA FOR > 12 SECONDS,
 //! OR KILLS NVDA WITHOUT A WORD...
 //! I SHALL ROAR, SLAY THE FROZEN COMA PROCESS, SUMMON THE RESURRECTION RITUAL (100x),
 //! AND REVIVE NVDA BEFORE THE GODS THEMSELVES CAN NOTICE!"
 //! 
 //! Class: ELITE SHADOW NECROMANCER (Level 100)
 //! Features:
-//! 1. Coma Watchdog: Heartbeat timer. If NVDA Main Thread freezes > 6s -> Mercy Kill & Auto-Revive!
-//! 2. Process Death Watchdog: Immediate revival if NVDA terminates without goodbye.
-//! 3. Two-Way Telepathic Banter over Named Pipe.
+//! 1. Single Instance Protection: Win32 Named Mutex `Global\NVDA_FIGHTER_BEAST_MUTEX`.
+//! 2. Persistent Battle Logging: Appends to `fighter_battle.log` so crash history is never wiped!
+//! 3. Coma Watchdog: 12-second threshold with 15-second startup grace period.
+//! 4. Process Death Watchdog: Immediate revival if NVDA terminates without goodbye.
 //! ==============================================================================
 
 use std::env;
 use std::ffi::OsStr;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Pipes::*;
@@ -32,14 +35,15 @@ use windows_sys::Win32::Storage::FileSystem::*;
 
 const PIPE_NAME: &str = r"\\.\pipe\nvda_fighter_sacred_pact";
 const SACRED_EXIT_HANDSHAKE: &str = "NVDA_FIGHTER_REST_IN_PEACE_MASTER_FAREWELL";
+const MUTEX_NAME: &str = r"Global\NVDA_FIGHTER_BEAST_MUTEX";
 
 // Win32 Constants
 const PIPE_ACCESS_DUPLEX_CONST: u32 = 0x00000003;
 const SYNCHRONIZE_CONST: u32 = 0x00100000;
 const PROCESS_TERMINATE_CONST: u32 = 0x00000001;
 
-// Maximum acceptable freeze before declaring NVDA in an unrecoverable COM coma
-const MAX_COMA_FREEZE_SECONDS: u64 = 6;
+// Generous 12-second threshold so heavy tasks don't cause false restarts
+const MAX_COMA_FREEZE_SECONDS: u64 = 12;
 
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -54,11 +58,33 @@ static BANTER_PHRASES: &[&str] = &[
     "Any villain tries to freeze NVDA, I strike from the shadows!",
 ];
 
-fn revive_nvda(nvda_exe_path: &str) {
-    println!("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-    println!("🔥 [🐺 BEAST-DAEMON:RAGE] ENGAGING 100x SACRED REVIVAL RITUAL!");
-    println!("⚡ [🐺 BEAST-DAEMON:CASTING] Casting Level 100 True Resurrection on: {}", nvda_exe_path);
-    println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+/// Persistent Battle Logger: writes to log file and console
+fn battle_log(log_path: &str, message: &str) {
+    let now = chrono_fallback_timestamp();
+    let line = format!("[{}] {}\n", now, message);
+    print!("{}", line);
+
+    if !log_path.is_empty() {
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
+fn chrono_fallback_timestamp() -> String {
+    let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st); }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
+    )
+}
+
+fn revive_nvda(log_path: &str, nvda_exe_path: &str) {
+    battle_log(log_path, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    battle_log(log_path, "🔥 [🐺 BEAST-DAEMON:RAGE] ENGAGING 100x SACRED REVIVAL RITUAL!");
+    battle_log(log_path, &format!("⚡ [🐺 BEAST-DAEMON:CASTING] Casting Level 100 True Resurrection on: {}", nvda_exe_path));
+    battle_log(log_path, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 
     let wide_exe = to_wide(nvda_exe_path);
     let wide_args = to_wide("-r");
@@ -76,22 +102,16 @@ fn revive_nvda(nvda_exe_path: &str) {
     };
 
     if (result as isize) > 32 {
-        println!("✨ [🐺 BEAST-DAEMON:TRIUMPH] WOW! 100x REVIVAL SUCCESSFUL! NVDA HAS RISEN FROM THE GRAVE!");
-        println!("👑 [🐺 BEAST-DAEMON:VICTORY] The screenreader lives on. The kingdom is saved! Long live NVDA!");
+        battle_log(log_path, "✨ [🐺 BEAST-DAEMON:TRIUMPH] WOW! 100x REVIVAL SUCCESSFUL! NVDA HAS RISEN FROM THE GRAVE!");
     } else {
-        eprintln!(
-            "☠️ [🐺 BEAST-DAEMON:DESPAIR] Failed to cast resurrection! ShellExecute error code: {}",
-            result as isize
-        );
+        battle_log(log_path, &format!("☠️ [🐺 BEAST-DAEMON:DESPAIR] Failed to cast resurrection! ShellExecute error code: {}", result as isize));
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!(
-            "[🐺 BEAST-DAEMON:ERROR] Usage: fighter_daemon.exe <NVDA_PID> <PATH_TO_NVDA_EXE>"
-        );
+        eprintln!("[🐺 BEAST-DAEMON:ERROR] Usage: fighter_daemon.exe <NVDA_PID> <PATH_TO_NVDA_EXE> [LOG_FILE_PATH]");
         return;
     }
 
@@ -103,26 +123,42 @@ fn main() {
         }
     };
     let nvda_exe_path = args[2].clone();
+    let log_file_path = if args.len() >= 4 { args[3].clone() } else { "fighter_battle.log".to_string() };
+
+    // -----------------------------------------------------------------------
+    // SINGLE INSTANCE PROTECTION (Win32 Named Mutex)
+    // -----------------------------------------------------------------------
+    let mutex_wide = to_wide(MUTEX_NAME);
+    let mutex_handle = unsafe {
+        CreateMutexW(std::ptr::null(), 1, mutex_wide.as_ptr())
+    };
+
+    if mutex_handle == std::ptr::null_mut() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        battle_log(&log_file_path, "[🐺 BEAST-DAEMON:WARN] Another Shadow Beast daemon is already vigilant! Exiting redundant beast.");
+        return;
+    }
 
     unsafe {
         SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     }
 
-    println!("==================================================================");
-    println!("🐺 [FIGHTER-DAEMON:SUMMONED] THE SHADOW BEAST HAS RISEN! (Level 100)");
-    println!("⚔️ Binding Soul to NVDA PID: {}", nvda_pid);
-    println!("🏰 Sacred Sanctuary Path: {}", nvda_exe_path);
-    println!("⏱️ Coma Timeout: {}s max freeze before emergency mercy-kill & revival", MAX_COMA_FREEZE_SECONDS);
-    println!("==================================================================");
+    battle_log(&log_file_path, "==================================================================");
+    battle_log(&log_file_path, "🐺 [FIGHTER-DAEMON:SUMMONED] THE SHADOW BEAST HAS RISEN! (Level 100)");
+    battle_log(&log_file_path, &format!("⚔️ Binding Soul to NVDA PID: {}", nvda_pid));
+    battle_log(&log_file_path, &format!("🏰 Sacred Sanctuary Path: {}", nvda_exe_path));
+    battle_log(&log_file_path, &format!("📜 Persistent Battle Log: {}", log_file_path));
+    battle_log(&log_file_path, &format!("⏱️ Coma Timeout: {}s max freeze before emergency mercy-kill & revival", MAX_COMA_FREEZE_SECONDS));
+    battle_log(&log_file_path, "==================================================================");
 
     let clean_exit_received = Arc::new(AtomicBool::new(false));
     let clean_exit_clone = clean_exit_received.clone();
     let heartbeat_counter = Arc::new(AtomicU64::new(0));
     let heartbeat_clone = heartbeat_counter.clone();
 
-    // Timestamp of the last pulse received from NVDA main thread (as seconds since epoch or monotonic)
     let last_pulse_instant = Arc::new(parking_lot_instant::MonotonicPulse::new());
     let last_pulse_clone = last_pulse_instant.clone();
+
+    let log_for_pipe = log_file_path.clone();
 
     // -----------------------------------------------------------------------
     // THREAD 1: TWO-WAY SACRED TELEPATHIC PIPE (Banter & Heartbeat)
@@ -168,13 +204,12 @@ fn main() {
                         let msg = incoming.trim();
 
                         if msg == SACRED_EXIT_HANDSHAKE {
-                            println!("\n🤝 [FIGHTER-DAEMON:HANDSHAKE] NVDA whispered: 'Hey bro, we are exiting. You also exit.'");
-                            println!("🛡️ [FIGHTER-DAEMON:REST] Honor recognized. The Beast sleeps peacefully. Bye, Master!");
+                            battle_log(&log_for_pipe, "🤝 [FIGHTER-DAEMON:HANDSHAKE] NVDA whispered: 'Hey bro, we are exiting. You also exit.'");
+                            battle_log(&log_for_pipe, "🛡️ [FIGHTER-DAEMON:REST] Honor recognized. The Beast sleeps peacefully. Bye, Master!");
                             clean_exit_clone.store(true, Ordering::SeqCst);
                             unsafe { CloseHandle(pipe_handle); }
                             return;
                         } else if msg.starts_with("PULSE:") {
-                            // Update last pulse time!
                             last_pulse_clone.ping();
 
                             let count = heartbeat_clone.fetch_add(1, Ordering::Relaxed);
@@ -210,10 +245,11 @@ fn main() {
     let exe_path_for_coma = nvda_exe_path.clone();
     let clean_exit_for_coma = clean_exit_received.clone();
     let last_pulse_for_coma = last_pulse_instant.clone();
+    let log_for_coma = log_file_path.clone();
 
     thread::spawn(move || {
-        // Give NVDA 10 seconds initial grace period to finish initializing
-        thread::sleep(Duration::from_secs(10));
+        // 15-second initial grace period to allow NVDA startup
+        thread::sleep(Duration::from_secs(15));
 
         loop {
             thread::sleep(Duration::from_millis(500));
@@ -224,11 +260,10 @@ fn main() {
 
             let elapsed_secs = last_pulse_for_coma.elapsed_secs();
             if elapsed_secs >= MAX_COMA_FREEZE_SECONDS {
-                // If the process is still running, it is completely frozen in a COM / UIA deadlock!
-                println!("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                println!("🚨 [🐺 BEAST-DAEMON:COMA-DETECTED] NVDA MAIN THREAD FROZEN FOR {} SECONDS!", elapsed_secs);
-                println!("💀 [🐺 BEAST-DAEMON:MERCY-KILL] Terminating hung PID {} to break catastrophic COM freeze...", nvda_pid);
-                println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+                battle_log(&log_for_coma, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                battle_log(&log_for_coma, &format!("🚨 [BEAST-DAEMON:COMA-DETECTED] NVDA MAIN THREAD FROZEN FOR {} SECONDS!", elapsed_secs));
+                battle_log(&log_for_coma, &format!("💀 [BEAST-DAEMON:MERCY-KILL] Terminating hung PID {} to break catastrophic COM freeze...", nvda_pid));
+                battle_log(&log_for_coma, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 
                 unsafe {
                     let kill_handle = OpenProcess(PROCESS_TERMINATE_CONST, 0, nvda_pid);
@@ -238,8 +273,7 @@ fn main() {
                     }
                 }
 
-                // Immediately resurrect NVDA!
-                revive_nvda(&exe_path_for_coma);
+                revive_nvda(&log_for_coma, &exe_path_for_coma);
                 thread::sleep(Duration::from_secs(5));
                 break;
             }
@@ -258,14 +292,11 @@ fn main() {
     };
 
     if process_handle == std::ptr::null_mut() {
-        eprintln!(
-            "[🐺 BEAST-DAEMON:CRITICAL] Failed to open soul-link to NVDA PID {}. Is it already slain?",
-            nvda_pid
-        );
+        battle_log(&log_file_path, &format!("[🐺 BEAST-DAEMON:CRITICAL] Failed to open soul-link to NVDA PID {}. Is it already slain?", nvda_pid));
         return;
     }
 
-    println!("[🐺 BEAST-DAEMON:PATROL] Soul-link forged! Standing eternal guard over NVDA...");
+    battle_log(&log_file_path, "[🐺 BEAST-DAEMON:PATROL] Soul-link forged! Standing eternal guard over NVDA...");
 
     unsafe {
         WaitForSingleObject(process_handle, INFINITE);
@@ -275,19 +306,19 @@ fn main() {
     thread::sleep(Duration::from_millis(200));
 
     if clean_exit_received.load(Ordering::SeqCst) {
-        println!("[🐺 BEAST-DAEMON:EXIT] Process shutdown verified as peaceful. The Beast sleeps.");
+        battle_log(&log_file_path, "[🐺 BEAST-DAEMON:EXIT] Process shutdown verified as peaceful. The Beast sleeps.");
+        unsafe { CloseHandle(mutex_handle); }
         return;
     }
 
-    // Process died unexpectedly without saying goodbye
-    println!("\n💥 [🐺 BEAST-DAEMON:PANIC] OH MY GOD! OH NO! NVDA VANISHED WITHOUT SAYING GOODBYE!");
-    println!("😭 [🐺 BEAST-DAEMON:SORROW] 'Forgive me, ancient ancestors! I could not prevent the blow!'");
-    revive_nvda(&nvda_exe_path);
+    battle_log(&log_file_path, "💥 [🐺 BEAST-DAEMON:PANIC] OH MY GOD! OH NO! NVDA VANISHED WITHOUT SAYING GOODBYE!");
+    battle_log(&log_file_path, "😭 [🐺 BEAST-DAEMON:SORROW] 'Forgive me, ancient ancestors! I could not prevent the blow!'");
+    revive_nvda(&log_file_path, &nvda_exe_path);
 
+    unsafe { CloseHandle(mutex_handle); }
     thread::sleep(Duration::from_millis(1500));
 }
 
-/// Helper struct for lockless monotonic pulse timing
 mod parking_lot_instant {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
@@ -314,7 +345,6 @@ mod parking_lot_instant {
             let now_ms = self.start.elapsed().as_millis() as u64;
             let last = self.last_ms.load(Ordering::SeqCst);
             if last == 0 {
-                // If no pulse received yet, return 0 to respect initial grace period
                 return 0;
             }
             (now_ms.saturating_sub(last)) / 1000

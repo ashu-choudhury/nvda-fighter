@@ -21,6 +21,7 @@ from ctypes import c_char_p, c_bool, c_uint64, c_int32, POINTER, byref, CFUNCTYP
 import subprocess
 import threading
 import time
+from datetime import datetime
 
 import globalPluginHandler
 import ui
@@ -34,14 +35,32 @@ from logHandler import log
 SACRED_PIPE_NAME = r"\\.\pipe\nvda_fighter_sacred_pact"
 SACRED_EXIT_HANDSHAKE = b"NVDA_FIGHTER_REST_IN_PEACE_MASTER_FAREWELL\n"
 
+# Persistent Log File
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOGS_DIR = os.path.join(_PLUGIN_DIR, "logs")
+os.makedirs(_LOGS_DIR, exist_ok=True)
+FIGHTER_LOG_FILE = os.path.join(_LOGS_DIR, "fighter_battle.log")
+
+
+def write_persistent_log(message: str):
+    """Writes to a dedicated persistent log file that NVDA restarts will NEVER wipe."""
+    try:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        line = f"[{now_str}] {message}\n"
+        with open(FIGHTER_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 # C-compatible logging callback signature: void(int level, const char* msg)
 LOG_CALLBACK_TYPE = CFUNCTYPE(None, c_int, c_char_p)
 
 
 def _nvda_python_logger(level, msg_ptr):
-    """Callback triggered directly from native Rust fighter_core.dll into NVDA log."""
     try:
         msg = msg_ptr.decode("utf-8", errors="replace") if msg_ptr else ""
+        write_persistent_log(f"[NATIVE] {msg}")
         if level >= 2:
             log.warning(f"[FIGHTER-NATIVE] {msg}")
         else:
@@ -54,40 +73,32 @@ _GLOBAL_NATIVE_LOG_CALLBACK = LOG_CALLBACK_TYPE(_nvda_python_logger)
 
 
 class FighterNativeBridge:
-    """Arcane bridge linking Python to the in-process Rust Shield (fighter_core.dll)."""
-
     def __init__(self, dll_path: str):
         self.loaded = False
         self._dll = None
 
         if not os.path.exists(dll_path):
-            log.warning(f"[FIGHTER-BRIDGE:WARN] Sacred core not found at {dll_path}")
+            write_persistent_log(f"[FIGHTER-BRIDGE:WARN] Sacred core not found at {dll_path}")
             return
 
         try:
             self._dll = ctypes.CDLL(dll_path)
 
-            # 1. Set NVDA Logger
             self._dll.fighter_set_nvda_logger.restype = None
             self._dll.fighter_set_nvda_logger.argtypes = [LOG_CALLBACK_TYPE]
 
-            # 2. Equip Divine Armor
             self._dll.fighter_equip_divine_armor.restype = c_bool
             self._dll.fighter_equip_divine_armor.argtypes = []
 
-            # 3. Intercept Text Dump
             self._dll.fighter_intercept_text_dump.restype = c_char_p
             self._dll.fighter_intercept_text_dump.argtypes = [c_char_p]
 
-            # 4. Free Shield Text
             self._dll.fighter_free_text.restype = None
             self._dll.fighter_free_text.argtypes = [c_char_p]
 
-            # 5. Memory Purge
             self._dll.fighter_purge_memory_leak.restype = c_uint64
             self._dll.fighter_purge_memory_leak.argtypes = []
 
-            # 6. Stats
             self._dll.fighter_get_stats.restype = None
             self._dll.fighter_get_stats.argtypes = [
                 POINTER(c_int32),
@@ -97,9 +108,9 @@ class FighterNativeBridge:
 
             self._dll.fighter_set_nvda_logger(_GLOBAL_NATIVE_LOG_CALLBACK)
             self.loaded = True
-            log.info("[FIGHTER-BRIDGE:SUCCESS] ⚔️ Level 100 Sacred Rust Core loaded into memory!")
+            write_persistent_log("[FIGHTER-BRIDGE:SUCCESS] ⚔️ Level 100 Sacred Rust Core loaded into memory!")
         except Exception as e:
-            log.error(f"[FIGHTER-BRIDGE:ERROR] Failed to bind to sacred core: {e}")
+            write_persistent_log(f"[FIGHTER-BRIDGE:ERROR] Failed to bind to sacred core: {e}")
 
     def equip_armor(self) -> bool:
         if self.loaded and self._dll:
@@ -107,7 +118,6 @@ class FighterNativeBridge:
         return False
 
     def intercept_text(self, text: str):
-        """Passes text to the Rust shield. Returns shielded text or None if safe."""
         if not self.loaded or not self._dll or len(text) <= 10000:
             return None
 
@@ -119,7 +129,7 @@ class FighterNativeBridge:
                 self._dll.fighter_free_text(res_ptr)
                 return shielded_str
         except Exception as e:
-            log.error(f"[FIGHTER-BRIDGE:ERROR] Text shield failed: {e}")
+            write_persistent_log(f"[FIGHTER-BRIDGE:ERROR] Text shield failed: {e}")
         return None
 
     def purge_memory(self) -> int:
@@ -142,8 +152,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        
+        self.plugin_dir = _PLUGIN_DIR
+        write_persistent_log("==================================================================")
+        write_persistent_log("[NVDA-FIGHTER:INIT] Awakening NVDA Fighter...")
+
         arch = "x64" if sys.maxsize > 2**32 else "x86"
         dll_candidates = [
             os.path.join(self.plugin_dir, "lib", arch, "fighter_core.dll"),
@@ -161,14 +173,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         dll_path = next((p for p in dll_candidates if os.path.exists(p)), dll_candidates[0])
         self.daemon_path = next((p for p in daemon_candidates if os.path.exists(p)), daemon_candidates[0])
 
-        log.info(f"[NVDA-FIGHTER:INIT] Awakening NVDA Fighter ({arch})... Core path: {dll_path}")
-
         # 1. Initialize Rust Native Bridge
         self.bridge = FighterNativeBridge(dll_path)
         if self.bridge.loaded:
             self.bridge.equip_armor()
 
-        # 2. Summon the Shadow Beast Daemon (Watchdog & Coma Sentry)
+        # 2. Summon the Shadow Beast Daemon (Single Instance Protected)
         self.daemon_proc = None
         self._summon_shadow_beast()
 
@@ -185,12 +195,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._patrol_thread = threading.Thread(target=self._telepathic_chatter_worker, daemon=True)
         self._patrol_thread.start()
 
-        log.info("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! UIA Gatekeeper & Coma Watchdog Armed!")
+        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! UIA Gatekeeper & Coma Watchdog Armed!")
 
     def _summon_shadow_beast(self):
-        """Summons the immortal out-of-process daemon to watch over NVDA."""
+        """Summons the immortal out-of-process daemon (safe against duplicate spawns)."""
         if not os.path.exists(self.daemon_path):
-            log.warning(f"[NVDA-FIGHTER:DAEMON] Shadow beast binary not found at {self.daemon_path}")
+            write_persistent_log(f"[NVDA-FIGHTER:DAEMON] Shadow beast binary not found at {self.daemon_path}")
             return
 
         try:
@@ -200,55 +210,63 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             DETACHED_PROCESS = 0x00000008
             CREATE_NO_WINDOW = 0x08000000
 
+            # Pass log file path as 4th argument so daemon writes to the exact same log file!
             self.daemon_proc = subprocess.Popen(
-                [self.daemon_path, my_pid, nvda_exe],
+                [self.daemon_path, my_pid, nvda_exe, FIGHTER_LOG_FILE],
                 creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
                 close_fds=True,
             )
-            log.info(f"[NVDA-FIGHTER:DAEMON] 🐺 Shadow Beast summoned! Linked to PID {my_pid}.")
+            write_persistent_log(f"[NVDA-FIGHTER:DAEMON] 🐺 Shadow Beast summoned! Linked to PID {my_pid}.")
         except Exception as e:
-            log.error(f"[NVDA-FIGHTER:DAEMON] Failed to summon Shadow Beast: {e}")
+            write_persistent_log(f"[NVDA-FIGHTER:DAEMON] Failed to summon Shadow Beast: {e}")
 
     def _hook_event_gatekeeper(self):
         """
         THE FRONTLINE GATEKEEPER:
-        Hooks eventHandler.queueEvent to catch terminal text-change storms BEFORE
-        they invoke out-of-process COM calls like compareEndPoints() or getSelection().
+        Aggressively intercepts terminal/console events BEFORE out-of-process COM calls.
         """
         self._original_queueEvent = eventHandler.queueEvent
         original_queue = self._original_queueEvent
         timestamps = self._terminal_event_timestamps
 
         def fighter_queue_event(eventName, obj, *args, **kwargs):
-            # Check if event is from a terminal or console window
-            if eventName in ("textChange", "liveRegionChanged", "caret", "valueChange"):
-                try:
+            try:
+                # Any text or caret event from console / terminal
+                if eventName in ("textChange", "liveRegionChanged", "caret", "valueChange"):
+                    # Check window class or process name without blocking COM calls
                     wClass = getattr(obj, "windowClassName", "")
-                    # Console, Windows Terminal, PowerShell, Mintty
-                    if wClass in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS") or "Terminal" in wClass:
+                    appModule = getattr(obj, "appModule", None)
+                    appName = getattr(appModule, "appName", "") if appModule else ""
+
+                    is_terminal = (
+                        wClass in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS")
+                        or "Terminal" in wClass
+                        or appName in ("cmd", "powershell", "windowsterminal", "conhost")
+                    )
+
+                    if is_terminal:
                         now = time.monotonic()
-                        # Prune older than 0.5s
+                        # Keep events from the last 0.5s
                         del timestamps[:[i for i, t in enumerate(timestamps) if now - t <= 0.5] or len(timestamps)]
                         timestamps.append(now)
 
-                        # If more than 15 events in 0.5s: FLOOD DETECTED! DROP THE EVENT!
-                        if len(timestamps) > 15:
-                            if len(timestamps) == 16:
-                                log.warning(
-                                    "[NVDA-FIGHTER:GATEKEEPER] 🛡️ Terminal UIA storm intercepted! "
-                                    "Throttling out-of-process COM calls to prevent freeze!"
+                        # If more than 5 terminal events arrive in 0.5s: DROP THEM!
+                        if len(timestamps) > 5:
+                            if len(timestamps) == 6:
+                                write_persistent_log(
+                                    f"[GATEKEEPER] 🛡️ Terminal storm detected from {appName or wClass}! "
+                                    "Disarming out-of-process COM calls to prevent freeze!"
                                 )
-                            return  # Discard event! NVDA will not block on frozen COM!
-                except Exception:
-                    pass
+                            return  # Discard event immediately!
+            except Exception as e:
+                write_persistent_log(f"[GATEKEEPER:ERROR] {e}")
 
             return original_queue(eventName, obj, *args, **kwargs)
 
         eventHandler.queueEvent = fighter_queue_event
-        log.info("[NVDA-FIGHTER:GATEKEEPER] 🛡️ UIA Event Gatekeeper active against terminal COM storms!")
+        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ UIA Event Gatekeeper active against terminal COM storms!")
 
     def _hook_speech_engine(self):
-        """Intercepts calls to speech.speak to catch massive text chunks."""
         fighter_bridge = self.bridge
         original_speak = self._original_speak
 
@@ -266,22 +284,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                             continue
                     modified_seq.append(item)
             except Exception as e:
-                log.error(f"[NVDA-FIGHTER:SPEECH] Shield inspection error: {e}")
+                write_persistent_log(f"[SPEECH:ERROR] {e}")
                 modified_seq = speechSequence
 
             if shield_triggered:
-                log.info("[NVDA-FIGHTER:SPEECH] ⚔️ Terminal / Global Dragon Breath neutralised by Shield!")
+                write_persistent_log("[SPEECH] ⚔️ Terminal / Global Dragon Breath neutralised by Shield!")
 
             return original_speak(modified_seq, symbolLevel=symbolLevel, priority=priority)
 
         speech.speak = fighter_guarded_speak
 
     def _telepathic_chatter_worker(self):
-        """
-        Two-way telepathic dialogue & pulse watchdog.
-        Pings the Shadow Beast every 1 second so the Beast knows NVDA is alive.
-        If NVDA freezes in COM for > 6 seconds, the Beast triggers a Mercy Kill & Instant Revival!
-        """
         pulse_count = 0
         while self._patrol_active:
             try:
@@ -291,7 +304,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
                 pulse_count += 1
 
-                # Every 30s, do garbage collection and working set trim
                 if pulse_count % 30 == 0:
                     gc.collect(2)
                     if self.bridge.loaded:
@@ -302,10 +314,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     try:
                         handle = ctypes.windll.kernel32.CreateFileW(
                             SACRED_PIPE_NAME,
-                            0xC0000000, # GENERIC_READ | GENERIC_WRITE
+                            0xC0000000,
                             0,
                             None,
-                            3, # OPEN_EXISTING
+                            3,
                             0,
                             None
                         )
@@ -323,9 +335,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                             buffer = ctypes.create_string_buffer(512)
                             bytes_read = ctypes.c_ulong(0)
                             if ctypes.windll.kernel32.ReadFile(handle, buffer, 512, byref(bytes_read), None):
-                                if bytes_read.value > 0 and pulse_count % 10 == 0:
+                                if bytes_read.value > 0 and pulse_count % 15 == 0:
                                     reply = buffer.value.decode("utf-8", errors="replace").strip()
-                                    log.info(f"[FIGHTER-TELEPATHY] 🐺 {reply}")
+                                    write_persistent_log(f"[FIGHTER-TELEPATHY] 🐺 {reply}")
                             ctypes.windll.kernel32.CloseHandle(handle)
                     except Exception:
                         pass
@@ -334,8 +346,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                 pass
 
     def terminate(self):
-        """Gracefully bid farewell to the Shadow Beast daemon."""
-        log.info("[NVDA-FIGHTER:TERMINATE] Initiating Sacred Farewell Handshake...")
+        write_persistent_log("[NVDA-FIGHTER:TERMINATE] Initiating Sacred Farewell Handshake...")
         self._patrol_active = False
 
         if hasattr(self, "_original_speak"):
@@ -364,7 +375,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                         None
                     )
                     ctypes.windll.kernel32.CloseHandle(handle)
-                log.info("[NVDA-FIGHTER:HANDSHAKE] Handshake delivered: 'Hey bro, we are exiting. Bye!'")
+                write_persistent_log("[NVDA-FIGHTER:HANDSHAKE] Handshake delivered: 'Hey bro, we are exiting. Bye!'")
         except Exception:
             pass
 
