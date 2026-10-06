@@ -252,30 +252,30 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                         delta = now - self._last_event_time
                         self._last_event_time = now
 
-                        # If delta is < 6 milliseconds (0.006s), it is an inhuman machine blast!
-                        if delta < 0.006:
+                        # If delta is < 2 milliseconds (0.002s), it is an inhuman machine blast!
+                        if delta < 0.002:
                             self._consecutive_fast_events += 1
                         else:
-                            # Natural human typing or normal SSH flow: reset streak!
-                            self._consecutive_fast_events = max(0, self._consecutive_fast_events - 1)
+                            # The moment an event arrives spaced >= 2ms (human typing, normal output, or pause),
+                            # INSTANTLY reset back to normal mode!
+                            self._consecutive_fast_events = 0
 
-                        # If a storm of 25 consecutive machine-speed events (<6ms each) is pouring in:
-                        if self._consecutive_fast_events > 25:
-                            # Discard the machine dump!
-                            if self._consecutive_fast_events == 26:
+                        # If a rapid storm of > 20 consecutive machine-speed events (<2ms each) is pouring in:
+                        if self._consecutive_fast_events > 20:
+                            if self._consecutive_fast_events == 21:
                                 write_persistent_log(
-                                    f"[GATEKEEPER] 🛡️ Machine burst detected from {appName or wClass} (<6ms spacing)! "
+                                    f"[GATEKEEPER] 🛡️ Inhuman machine bomb detected from {appName or wClass} (<2ms spacing)! "
                                     "Disarming toxic COM loop while preserving user input!"
                                 )
                                 self.bridge.record_shielding(1, 40000)
-                            return
+                            return  # Discard only the machine flood events!
             except Exception as e:
                 write_persistent_log(f"[GATEKEEPER:ERROR] {e}")
 
             return original_queue(eventName, obj, *args, **kwargs)
 
         eventHandler.queueEvent = fighter_queue_event
-        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ Smart Adaptive Burst Gatekeeper active (<6ms spacing check)!")
+        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ Smart Adaptive Burst Gatekeeper active (<2ms spacing, instant recovery)!")
 
     def _hook_speech_engine(self):
         fighter_bridge = self.bridge
