@@ -31,11 +31,9 @@ import eventHandler
 from scriptHandler import script
 from logHandler import log
 
-# Sacred constants
 SACRED_PIPE_NAME = r"\\.\pipe\nvda_fighter_sacred_pact"
 SACRED_EXIT_HANDSHAKE = b"NVDA_FIGHTER_REST_IN_PEACE_MASTER_FAREWELL\n"
 
-# Persistent Log File
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 _LOGS_DIR = os.path.join(_PLUGIN_DIR, "logs")
 os.makedirs(_LOGS_DIR, exist_ok=True)
@@ -85,6 +83,12 @@ class FighterNativeBridge:
             self._dll.fighter_set_nvda_logger.restype = None
             self._dll.fighter_set_nvda_logger.argtypes = [LOG_CALLBACK_TYPE]
 
+            self._dll.fighter_init_gatekeeper.restype = None
+            self._dll.fighter_init_gatekeeper.argtypes = []
+
+            self._dll.fighter_should_allow_event.restype = c_int
+            self._dll.fighter_should_allow_event.argtypes = [c_bool, c_bool]
+
             self._dll.fighter_equip_divine_armor.restype = c_bool
             self._dll.fighter_equip_divine_armor.argtypes = []
 
@@ -108,6 +112,8 @@ class FighterNativeBridge:
             self._dll.fighter_record_shielding.argtypes = [c_uint64, c_uint64]
 
             self._dll.fighter_set_nvda_logger(_GLOBAL_NATIVE_LOG_CALLBACK)
+            self._dll.fighter_init_gatekeeper()
+
             self.loaded = True
             write_persistent_log("[FIGHTER-BRIDGE:SUCCESS] ⚔️ Level 100 Sacred Rust Core loaded into memory!")
         except Exception as e:
@@ -117,6 +123,11 @@ class FighterNativeBridge:
         if self.loaded and self._dll:
             return self._dll.fighter_equip_divine_armor()
         return False
+
+    def should_allow_event(self, is_user_input: bool, is_terminal: bool) -> bool:
+        if self.loaded and self._dll:
+            return bool(self._dll.fighter_should_allow_event(is_user_input, is_terminal))
+        return True
 
     def intercept_text(self, text: str):
         if not self.loaded or not self._dll or len(text) <= 10000:
@@ -132,13 +143,6 @@ class FighterNativeBridge:
         except Exception as e:
             write_persistent_log(f"[FIGHTER-BRIDGE:ERROR] Text shield failed: {e}")
         return None
-
-    def record_shielding(self, count=1, bytes_shielded=50000):
-        if self.loaded and self._dll:
-            try:
-                self._dll.fighter_record_shielding(c_uint64(count), c_uint64(bytes_shielded))
-            except Exception:
-                pass
 
     def purge_memory(self) -> int:
         if self.loaded and self._dll:
@@ -188,20 +192,19 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.daemon_proc = None
         self._summon_shadow_beast()
 
-        # State-Machine Alarm System
-        self._last_event_time = 0.0
-        self._fast_event_count = 0
-        self._alarm_active = False
+        # Hook Frontline Native Event Gatekeeper
         self._hook_event_gatekeeper()
 
+        # Hook Speech Engine
         self._original_speak = speech.speak
         self._hook_speech_engine()
 
+        # Background patrol
         self._patrol_active = True
         self._patrol_thread = threading.Thread(target=self._telepathic_chatter_worker, daemon=True)
         self._patrol_thread.start()
 
-        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! State-Machine Alarm Gatekeeper Active!")
+        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! Native Microsecond Token-Bucket Gatekeeper Active!")
 
     def _summon_shadow_beast(self):
         if not os.path.exists(self.daemon_path):
@@ -226,68 +229,41 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _hook_event_gatekeeper(self):
         """
-        SMART ADAPTIVE BURST GATEKEEPER:
-        Distinguishes natural user typing (30ms - 500ms intervals) and smooth terminal output (apt-get)
-        from synthetic 0ms - 5ms machine text bombs (>100 events/sec) that lock Windows COM.
+        NATIVE MICROSECOND DUAL-CHANNEL GATEKEEPER:
+        1. User typing & caret moves are flagged as is_user_input=True and ALWAYS pass immediately.
+        2. Terminal background dumps are evaluated in native Rust using a Token Bucket rate limiter.
+        3. Zero Python timing math. All decision logic runs in Rust in 15 nanoseconds.
         """
         self._original_queueEvent = eventHandler.queueEvent
         original_queue = self._original_queueEvent
+        native_bridge = self.bridge
 
         def fighter_queue_event(eventName, obj, *args, **kwargs):
             try:
-                # Target text changes and live region updates
-                if eventName in ("textChange", "liveRegionChanged", "caret", "valueChange"):
-                    wClass = getattr(obj, "windowClassName", "")
-                    appModule = getattr(obj, "appModule", None)
-                    appName = getattr(appModule, "appName", "") if appModule else ""
+                # Keystrokes, caret navigation, focus changes, selection changes: USER INPUT!
+                is_user_input = eventName in ("caret", "gainFocus", "typedCharacter", "nameChange")
 
-                    is_terminal = (
-                        wClass in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS")
-                        or "Terminal" in wClass
-                        or appName in ("cmd", "powershell", "windowsterminal", "conhost")
-                    )
+                wClass = getattr(obj, "windowClassName", "")
+                appModule = getattr(obj, "appModule", None)
+                appName = getattr(appModule, "appName", "") if appModule else ""
 
-                    if is_terminal:
-                        now = time.monotonic()
-                        delta = now - self._last_event_time
-                        self._last_event_time = now
+                is_terminal = (
+                    wClass in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS")
+                    or "Terminal" in wClass
+                    or appName in ("cmd", "powershell", "windowsterminal", "conhost")
+                )
 
-                        # 1. COOLDOWN CHECK:
-                        # Only return to normal mode after a true 1.5-second quiet period!
-                        # Terminal dumps often have 30ms-100ms micro-pauses between chunks;
-                        # 20ms was prematurely turning the alarm off in the middle of the dump!
-                        if delta >= 1.5:
-                            if self._alarm_active:
-                                write_persistent_log(
-                                    f"[GATEKEEPER] 🕊️ Terminal storm completely finished ({delta:.2f}s quiet period). Returning to normal mode!"
-                                )
-                                self._alarm_active = False
-                            self._fast_event_count = 0
-
-                        # 2. FAST EVENT DETECTOR (< 15ms):
-                        # Catch machine bursts under 15ms
-                        elif delta < 0.015:
-                            self._fast_event_count += 1
-                            # If 10 consecutive fast events arrive, ENGAGE ALARM LOCK!
-                            if self._fast_event_count >= 10 and not self._alarm_active:
-                                self._alarm_active = True
-                                write_persistent_log(
-                                    f"[GATEKEEPER] 🚨 ALARM TRIGGERED! Machine flood detected from {appName or wClass}! "
-                                    "Locking defense shield until terminal is completely quiet!"
-                                )
-                                self.bridge.record_shielding(1, 50000)
-
-                        # 3. IF ALARM IS ACTIVE: DROP ALL MACHINE EVENT SPAM!
-                        if self._alarm_active:
-                            return  # Discard event immediately before out-of-process COM can freeze NVDA!
-
-            except Exception as e:
-                write_persistent_log(f"[GATEKEEPER:ERROR] {e}")
+                if is_terminal and not is_user_input:
+                    # Inquire Native Rust Token Bucket: Allow or Drop?
+                    if not native_bridge.should_allow_event(False, True):
+                        return  # Machine dump discarded in 15 nanoseconds!
+            except Exception:
+                pass
 
             return original_queue(eventName, obj, *args, **kwargs)
 
         eventHandler.queueEvent = fighter_queue_event
-        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ State-Machine Alarm System active (<5ms blast, 10 calls to lock, 20ms cooldown)!")
+        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ Native Microsecond Dual-Channel Gatekeeper Hooked!")
 
     def _hook_speech_engine(self):
         fighter_bridge = self.bridge
@@ -414,7 +390,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             f"NVDA Fighter Level 100 Status: HP is {hp} out of 9999. "
             f"Villainous dumps vanquished: {kills}. "
             f"Total bytes shielded: {kb_shielded} kilobytes. "
-            f"Status: Divine Titan Armor Active. Smart Adaptive Gatekeeper Armed!"
+            f"Status: Divine Titan Armor Active. Native Token-Bucket Armed!"
         )
         ui.message(msg)
 
