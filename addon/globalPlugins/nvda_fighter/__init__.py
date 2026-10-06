@@ -188,10 +188,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.daemon_proc = None
         self._summon_shadow_beast()
 
-        # Terminal Burst Tracking
-        self._terminal_event_timestamps = []
+        # State-Machine Alarm System
         self._last_event_time = 0.0
-        self._consecutive_fast_events = 0
+        self._fast_event_count = 0
+        self._alarm_active = False
         self._hook_event_gatekeeper()
 
         self._original_speak = speech.speak
@@ -201,7 +201,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._patrol_thread = threading.Thread(target=self._telepathic_chatter_worker, daemon=True)
         self._patrol_thread.start()
 
-        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! Smart Adaptive Burst Gatekeeper Active!")
+        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! State-Machine Alarm Gatekeeper Active!")
 
     def _summon_shadow_beast(self):
         if not os.path.exists(self.daemon_path):
@@ -252,30 +252,39 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                         delta = now - self._last_event_time
                         self._last_event_time = now
 
-                        # If delta is < 2 milliseconds (0.002s), it is an inhuman machine blast!
-                        if delta < 0.002:
-                            self._consecutive_fast_events += 1
-                        else:
-                            # The moment an event arrives spaced >= 2ms (human typing, normal output, or pause),
-                            # INSTANTLY reset back to normal mode!
-                            self._consecutive_fast_events = 0
-
-                        # If a rapid storm of > 20 consecutive machine-speed events (<2ms each) is pouring in:
-                        if self._consecutive_fast_events > 20:
-                            if self._consecutive_fast_events == 21:
+                        # 1. COOLDOWN CHECK:
+                        # If >= 20ms (0.020s) has passed since the last event, things have truly cooled down!
+                        if delta >= 0.020:
+                            if self._alarm_active:
                                 write_persistent_log(
-                                    f"[GATEKEEPER] 🛡️ Inhuman machine bomb detected from {appName or wClass} (<2ms spacing)! "
-                                    "Disarming toxic COM loop while preserving user input!"
+                                    f"[GATEKEEPER] 🕊️ Terminal storm cooled down ({delta*1000:.1f}ms pause). Returning to normal mode!"
                                 )
-                                self.bridge.record_shielding(1, 40000)
-                            return  # Discard only the machine flood events!
+                                self._alarm_active = False
+                            self._fast_event_count = 0
+
+                        # 2. FAST EVENT DETECTOR (< 5ms):
+                        elif delta < 0.005:
+                            self._fast_event_count += 1
+                            # If 10 consecutive fast events arrive under 5ms, ENGAGE ALARM SYSTEM!
+                            if self._fast_event_count >= 10 and not self._alarm_active:
+                                self._alarm_active = True
+                                write_persistent_log(
+                                    f"[GATEKEEPER] 🚨 ALARM TRIGGERED! 10 events under 5ms from {appName or wClass}! "
+                                    "Locking defense shield and dumping all machine spam until 20ms cooldown!"
+                                )
+                                self.bridge.record_shielding(1, 50000)
+
+                        # 3. IF ALARM IS ACTIVE: DROP EVERYTHING FROM THE FLOOD!
+                        if self._alarm_active:
+                            return  # Discard event immediately before out-of-process COM can freeze NVDA!
+
             except Exception as e:
                 write_persistent_log(f"[GATEKEEPER:ERROR] {e}")
 
             return original_queue(eventName, obj, *args, **kwargs)
 
         eventHandler.queueEvent = fighter_queue_event
-        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ Smart Adaptive Burst Gatekeeper active (<2ms spacing, instant recovery)!")
+        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ State-Machine Alarm System active (<5ms blast, 10 calls to lock, 20ms cooldown)!")
 
     def _hook_speech_engine(self):
         fighter_bridge = self.bridge
