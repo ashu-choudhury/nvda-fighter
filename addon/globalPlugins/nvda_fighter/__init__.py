@@ -26,6 +26,7 @@ import globalPluginHandler
 import ui
 import speech
 import api
+import eventHandler
 from scriptHandler import script
 from logHandler import log
 
@@ -49,7 +50,6 @@ def _nvda_python_logger(level, msg_ptr):
         pass
 
 
-# Keep a persistent reference so Python GC doesn't collect the C function pointer
 _GLOBAL_NATIVE_LOG_CALLBACK = LOG_CALLBACK_TYPE(_nvda_python_logger)
 
 
@@ -95,9 +95,7 @@ class FighterNativeBridge:
                 POINTER(c_uint64),
             ]
 
-            # Hook the native logger directly to NVDA
             self._dll.fighter_set_nvda_logger(_GLOBAL_NATIVE_LOG_CALLBACK)
-
             self.loaded = True
             log.info("[FIGHTER-BRIDGE:SUCCESS] ⚔️ Level 100 Sacred Rust Core loaded into memory!")
         except Exception as e:
@@ -146,19 +144,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         super().__init__(*args, **kwargs)
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # NVDA runs as 32-bit (x86) on official builds or 64-bit on x64 builds
         arch = "x64" if sys.maxsize > 2**32 else "x86"
         dll_candidates = [
             os.path.join(self.plugin_dir, "lib", arch, "fighter_core.dll"),
             os.path.join(self.plugin_dir, "fighter_core.dll"),
-            # Repo targets
             os.path.abspath(os.path.join(self.plugin_dir, "..", "..", "..", "target", "i686-pc-windows-msvc", "release", "fighter_core.dll")),
             os.path.abspath(os.path.join(self.plugin_dir, "..", "..", "..", "target", "release", "fighter_core.dll")),
         ]
         daemon_candidates = [
             os.path.join(self.plugin_dir, "bin", arch, "fighter_daemon.exe"),
             os.path.join(self.plugin_dir, "fighter_daemon.exe"),
-            # Repo targets
             os.path.abspath(os.path.join(self.plugin_dir, "..", "..", "..", "target", "i686-pc-windows-msvc", "release", "fighter_daemon.exe")),
             os.path.abspath(os.path.join(self.plugin_dir, "..", "..", "..", "target", "release", "fighter_daemon.exe")),
         ]
@@ -173,20 +168,24 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         if self.bridge.loaded:
             self.bridge.equip_armor()
 
-        # 2. Summon the Shadow Beast Daemon (Watchdog & Necromancer)
+        # 2. Summon the Shadow Beast Daemon (Watchdog & Coma Sentry)
         self.daemon_proc = None
         self._summon_shadow_beast()
 
-        # 3. Hook into Speech Engine to Defend Against Explosive Text Dumps
+        # 3. Hook Frontline Event Gatekeeper (Stops Terminal COM Freezes & Storms)
+        self._terminal_event_timestamps = []
+        self._hook_event_gatekeeper()
+
+        # 4. Hook Speech Engine
         self._original_speak = speech.speak
         self._hook_speech_engine()
 
-        # 4. Start Telepathic Chatter & Mutual Health Patrol Thread (1-second heartbeat)
+        # 5. Start Telepathic Chatter & Main-Thread Pulse Worker
         self._patrol_active = True
         self._patrol_thread = threading.Thread(target=self._telepathic_chatter_worker, daemon=True)
         self._patrol_thread.start()
 
-        log.info("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! NVDA and Kernel now share equal authority!")
+        log.info("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! UIA Gatekeeper & Coma Watchdog Armed!")
 
     def _summon_shadow_beast(self):
         """Summons the immortal out-of-process daemon to watch over NVDA."""
@@ -210,8 +209,46 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         except Exception as e:
             log.error(f"[NVDA-FIGHTER:DAEMON] Failed to summon Shadow Beast: {e}")
 
+    def _hook_event_gatekeeper(self):
+        """
+        THE FRONTLINE GATEKEEPER:
+        Hooks eventHandler.queueEvent to catch terminal text-change storms BEFORE
+        they invoke out-of-process COM calls like compareEndPoints() or getSelection().
+        """
+        self._original_queueEvent = eventHandler.queueEvent
+        original_queue = self._original_queueEvent
+        timestamps = self._terminal_event_timestamps
+
+        def fighter_queue_event(eventName, obj, *args, **kwargs):
+            # Check if event is from a terminal or console window
+            if eventName in ("textChange", "liveRegionChanged", "caret", "valueChange"):
+                try:
+                    wClass = getattr(obj, "windowClassName", "")
+                    # Console, Windows Terminal, PowerShell, Mintty
+                    if wClass in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS") or "Terminal" in wClass:
+                        now = time.monotonic()
+                        # Prune older than 0.5s
+                        del timestamps[:[i for i, t in enumerate(timestamps) if now - t <= 0.5] or len(timestamps)]
+                        timestamps.append(now)
+
+                        # If more than 15 events in 0.5s: FLOOD DETECTED! DROP THE EVENT!
+                        if len(timestamps) > 15:
+                            if len(timestamps) == 16:
+                                log.warning(
+                                    "[NVDA-FIGHTER:GATEKEEPER] 🛡️ Terminal UIA storm intercepted! "
+                                    "Throttling out-of-process COM calls to prevent freeze!"
+                                )
+                            return  # Discard event! NVDA will not block on frozen COM!
+                except Exception:
+                    pass
+
+            return original_queue(eventName, obj, *args, **kwargs)
+
+        eventHandler.queueEvent = fighter_queue_event
+        log.info("[NVDA-FIGHTER:GATEKEEPER] 🛡️ UIA Event Gatekeeper active against terminal COM storms!")
+
     def _hook_speech_engine(self):
-        """Intercepts calls to speech.speak to catch text floods before speech chokes."""
+        """Intercepts calls to speech.speak to catch massive text chunks."""
         fighter_bridge = self.bridge
         original_speak = self._original_speak
 
@@ -238,14 +275,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             return original_speak(modified_seq, symbolLevel=symbolLevel, priority=priority)
 
         speech.speak = fighter_guarded_speak
-        log.info("[NVDA-FIGHTER:SPEECH] 🛡️ Speech Engine guarded by Sacred Text Shield.")
 
     def _telepathic_chatter_worker(self):
         """
-        Two-way telepathic dialogue between Paladin (NVDA) and Beast Daemon (Watchdog).
-        Chats every ~1.0 second:
-        'How's it going bro?' -> 'All clear on perimeter! Watching the Kernel!'
-        Detects internal lag, purges RAM, and broadcasts alerts.
+        Two-way telepathic dialogue & pulse watchdog.
+        Pings the Shadow Beast every 1 second so the Beast knows NVDA is alive.
+        If NVDA freezes in COM for > 6 seconds, the Beast triggers a Mercy Kill & Instant Revival!
         """
         pulse_count = 0
         while self._patrol_active:
@@ -255,18 +290,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                     break
 
                 pulse_count += 1
-                start_tick = time.perf_counter()
 
-                # Every 30 seconds, perform background GC and memory trim
+                # Every 30s, do garbage collection and working set trim
                 if pulse_count % 30 == 0:
                     gc.collect(2)
                     if self.bridge.loaded:
                         self.bridge.purge_memory()
 
-                # Talk to the Shadow Beast via Named Pipe
+                # Send PULSE to the Shadow Beast daemon
                 if os.path.exists(SACRED_PIPE_NAME):
                     try:
-                        # Open pipe in read/write
                         handle = ctypes.windll.kernel32.CreateFileW(
                             SACRED_PIPE_NAME,
                             0xC0000000, # GENERIC_READ | GENERIC_WRITE
@@ -277,8 +310,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                             None
                         )
                         if handle != -1 and handle != 0:
-                            # Send pulse message
-                            pulse_msg = f"PULSE: Paladin heartbeat #{pulse_count}\n".encode("utf-8")
+                            pulse_msg = f"PULSE: #{pulse_count}\n".encode("utf-8")
                             bytes_written = ctypes.c_ulong(0)
                             ctypes.windll.kernel32.WriteFile(
                                 handle,
@@ -288,46 +320,37 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                                 None
                             )
 
-                            # Read Beast reply
                             buffer = ctypes.create_string_buffer(512)
                             bytes_read = ctypes.c_ulong(0)
                             if ctypes.windll.kernel32.ReadFile(handle, buffer, 512, byref(bytes_read), None):
-                                if bytes_read.value > 0:
+                                if bytes_read.value > 0 and pulse_count % 10 == 0:
                                     reply = buffer.value.decode("utf-8", errors="replace").strip()
-                                    if pulse_count % 10 == 0: # Log banter occasionally to not spam
-                                        log.info(f"[FIGHTER-TELEPATHY] 🐺 {reply}")
+                                    log.info(f"[FIGHTER-TELEPATHY] 🐺 {reply}")
                             ctypes.windll.kernel32.CloseHandle(handle)
                     except Exception:
                         pass
-
-                # Lag Detection: If a 1-second sleep took > 2.5 seconds, NVDA's thread lagged!
-                elapsed = time.perf_counter() - start_tick
-                if elapsed > 2.5:
-                    log.warning(f"[NVDA-FIGHTER:LAG-ALERT] ⚠️ Thread stutter detected ({elapsed:.2f}s)! Engaging Alchemical Purge!")
-                    gc.collect(2)
-                    if self.bridge.loaded:
-                        self.bridge.purge_memory()
 
             except Exception:
                 pass
 
     def terminate(self):
-        """Gracefully bid farewell to the Shadow Beast daemon so it does not trigger revival."""
+        """Gracefully bid farewell to the Shadow Beast daemon."""
         log.info("[NVDA-FIGHTER:TERMINATE] Initiating Sacred Farewell Handshake...")
         self._patrol_active = False
 
         if hasattr(self, "_original_speak"):
             speech.speak = self._original_speak
+        if hasattr(self, "_original_queueEvent"):
+            eventHandler.queueEvent = self._original_queueEvent
 
-        # Deliver the Sacred Handshake over Named Pipe:
         try:
             if os.path.exists(SACRED_PIPE_NAME):
                 handle = ctypes.windll.kernel32.CreateFileW(
                     SACRED_PIPE_NAME,
-                    0x40000000, # GENERIC_WRITE
+                    0x40000000,
                     0,
                     None,
-                    3, # OPEN_EXISTING
+                    3,
                     0,
                     None
                 )
@@ -347,10 +370,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         super().terminate()
 
-    # -----------------------------------------------------------------------
-    # HEROIC RPG SCRIPTS / HOTKEYS
-    # -----------------------------------------------------------------------
-
     @script(
         description="Inspect the sacred stats and HP of NVDA Fighter",
         gesture="kb:NVDA+alt+f",
@@ -362,7 +381,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             f"NVDA Fighter Level 100 Status: HP is {hp} out of 9999. "
             f"Villainous dumps vanquished: {kills}. "
             f"Total bytes shielded: {kb_shielded} kilobytes. "
-            f"Status: Divine Titan Armor Active. NVDA and Kernel share equal authority!"
+            f"Status: Divine Titan Armor Active. UIA Gatekeeper Armed!"
         )
         ui.message(msg)
 
