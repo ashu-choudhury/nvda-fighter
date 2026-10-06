@@ -253,28 +253,31 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
                         self._last_event_time = now
 
                         # 1. COOLDOWN CHECK:
-                        # If >= 20ms (0.020s) has passed since the last event, things have truly cooled down!
-                        if delta >= 0.020:
+                        # Only return to normal mode after a true 1.5-second quiet period!
+                        # Terminal dumps often have 30ms-100ms micro-pauses between chunks;
+                        # 20ms was prematurely turning the alarm off in the middle of the dump!
+                        if delta >= 1.5:
                             if self._alarm_active:
                                 write_persistent_log(
-                                    f"[GATEKEEPER] 🕊️ Terminal storm cooled down ({delta*1000:.1f}ms pause). Returning to normal mode!"
+                                    f"[GATEKEEPER] 🕊️ Terminal storm completely finished ({delta:.2f}s quiet period). Returning to normal mode!"
                                 )
                                 self._alarm_active = False
                             self._fast_event_count = 0
 
-                        # 2. FAST EVENT DETECTOR (< 5ms):
-                        elif delta < 0.005:
+                        # 2. FAST EVENT DETECTOR (< 15ms):
+                        # Catch machine bursts under 15ms
+                        elif delta < 0.015:
                             self._fast_event_count += 1
-                            # If 10 consecutive fast events arrive under 5ms, ENGAGE ALARM SYSTEM!
+                            # If 10 consecutive fast events arrive, ENGAGE ALARM LOCK!
                             if self._fast_event_count >= 10 and not self._alarm_active:
                                 self._alarm_active = True
                                 write_persistent_log(
-                                    f"[GATEKEEPER] 🚨 ALARM TRIGGERED! 10 events under 5ms from {appName or wClass}! "
-                                    "Locking defense shield and dumping all machine spam until 20ms cooldown!"
+                                    f"[GATEKEEPER] 🚨 ALARM TRIGGERED! Machine flood detected from {appName or wClass}! "
+                                    "Locking defense shield until terminal is completely quiet!"
                                 )
                                 self.bridge.record_shielding(1, 50000)
 
-                        # 3. IF ALARM IS ACTIVE: DROP EVERYTHING FROM THE FLOOD!
+                        # 3. IF ALARM IS ACTIVE: DROP ALL MACHINE EVENT SPAM!
                         if self._alarm_active:
                             return  # Discard event immediately before out-of-process COM can freeze NVDA!
 
