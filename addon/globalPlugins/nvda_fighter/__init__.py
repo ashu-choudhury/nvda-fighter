@@ -31,6 +31,12 @@ import eventHandler
 from scriptHandler import script
 from logHandler import log
 
+# Import NVDA internal LiveText behavior
+try:
+    from NVDAObjects.behaviors import LiveText
+except ImportError:
+    LiveText = None
+
 SACRED_PIPE_NAME = r"\\.\pipe\nvda_fighter_sacred_pact"
 SACRED_EXIT_HANDSHAKE = b"NVDA_FIGHTER_REST_IN_PEACE_MASTER_FAREWELL\n"
 
@@ -144,6 +150,13 @@ class FighterNativeBridge:
             write_persistent_log(f"[FIGHTER-BRIDGE:ERROR] Text shield failed: {e}")
         return None
 
+    def record_shielding(self, count=1, bytes_shielded=50000):
+        if self.loaded and self._dll:
+            try:
+                self._dll.fighter_record_shielding(c_uint64(count), c_uint64(bytes_shielded))
+            except Exception:
+                pass
+
     def purge_memory(self) -> int:
         if self.loaded and self._dll:
             return int(self._dll.fighter_purge_memory_leak())
@@ -192,10 +205,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self.daemon_proc = None
         self._summon_shadow_beast()
 
-        # Hook Frontline Native Event Gatekeeper
+        # 1. Apply Linux/Orca-Style LiveText Governor (THE CORE SOLUTION!)
+        self._apply_livetext_governor()
+
+        # 2. Hook Native Event Gatekeeper
         self._hook_event_gatekeeper()
 
-        # Hook Speech Engine
+        # 3. Hook Speech Engine
         self._original_speak = speech.speak
         self._hook_speech_engine()
 
@@ -204,7 +220,30 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._patrol_thread = threading.Thread(target=self._telepathic_chatter_worker, daemon=True)
         self._patrol_thread.start()
 
-        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! Native Microsecond Token-Bucket Gatekeeper Active!")
+        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! Linux-Style Terminal Governor Armed!")
+
+    def _apply_livetext_governor(self):
+        """
+        THE ARCHITECTURAL CORE (Linux / Orca Philosophy):
+        In Linux, the terminal loop sleeps slightly between chunks and drops text backlogs.
+        In NVDA, LiveText.STABILIZE_DELAY defaults to 0 and MAX_LINES defaults to 100!
+        When 5,000 lines dump:
+        1. LiveText wakes up 5,000 times with 0ms delay.
+        2. It diffs hundreds of thousands of characters using difflib.
+        3. It queues thousands of lines into the main thread generator!
+
+        WE FORTIFY LIVETEXT DIRECTLY:
+        - Set STABILIZE_DELAY to 0.04s (40ms): Allows console output to settle into a single batch!
+        - Cap MAX_LINES to 15 lines: Only read the last 15 lines of any massive dump!
+        """
+        if LiveText is not None:
+            try:
+                # 40ms stabilize delay lets 5,000 lines dump in ONE single reading pass instead of 5,000 passes!
+                LiveText.STABILIZE_DELAY = 0.04
+                LiveText.MAX_LINES = 15
+                write_persistent_log("[NVDA-FIGHTER:GOVERNOR] ⚔️ LiveText Governor Patched: STABILIZE_DELAY=40ms, MAX_LINES=15!")
+            except Exception as e:
+                write_persistent_log(f"[NVDA-FIGHTER:GOVERNOR-ERROR] {e}")
 
     def _summon_shadow_beast(self):
         if not os.path.exists(self.daemon_path):
@@ -228,23 +267,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             write_persistent_log(f"[NVDA-FIGHTER:DAEMON] Failed to summon Shadow Beast: {e}")
 
     def _hook_event_gatekeeper(self):
-        """
-        NATIVE MICROSECOND DUAL-CHANNEL GATEKEEPER:
-        1. User typing & caret moves are flagged as is_user_input=True and ALWAYS pass immediately.
-        2. Terminal background dumps are evaluated in native Rust using a Token Bucket rate limiter.
-        3. Zero Python timing math. All decision logic runs in Rust in 15 nanoseconds.
-        """
         self._original_queueEvent = eventHandler.queueEvent
         original_queue = self._original_queueEvent
         native_bridge = self.bridge
 
         def fighter_queue_event(eventName, obj, *args, **kwargs):
             try:
-                # User typing & navigation ALWAYS PASS!
                 is_user_input = eventName in ("caret", "gainFocus", "typedCharacter", "nameChange")
 
                 if not is_user_input:
-                    # Robustly check window class and app name
                     wClass = ""
                     try:
                         wClass = str(getattr(obj, "windowClassName", "") or "")
@@ -267,7 +298,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
                     if is_terminal:
                         if not native_bridge.should_allow_event(False, True):
-                            return  # Native Rust Token Bucket dropped flood!
+                            return
             except Exception as e:
                 write_persistent_log(f"[GATEKEEPER:EXCEPTION] {e}")
 
@@ -401,7 +432,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             f"NVDA Fighter Level 100 Status: HP is {hp} out of 9999. "
             f"Villainous dumps vanquished: {kills}. "
             f"Total bytes shielded: {kb_shielded} kilobytes. "
-            f"Status: Divine Titan Armor Active. Native Token-Bucket Armed!"
+            f"Status: Divine Titan Armor Active. Linux LiveText Governor Armed!"
         )
         ui.message(msg)
 
