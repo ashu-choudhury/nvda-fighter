@@ -43,7 +43,6 @@ FIGHTER_LOG_FILE = os.path.join(_LOGS_DIR, "fighter_battle.log")
 
 
 def write_persistent_log(message: str):
-    """Writes to a dedicated persistent log file that NVDA restarts will NEVER wipe."""
     try:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         line = f"[{now_str}] {message}\n"
@@ -53,7 +52,6 @@ def write_persistent_log(message: str):
         pass
 
 
-# C-compatible logging callback signature: void(int level, const char* msg)
 LOG_CALLBACK_TYPE = CFUNCTYPE(None, c_int, c_char_p)
 
 
@@ -106,6 +104,9 @@ class FighterNativeBridge:
                 POINTER(c_uint64),
             ]
 
+            self._dll.fighter_record_shielding.restype = None
+            self._dll.fighter_record_shielding.argtypes = [c_uint64, c_uint64]
+
             self._dll.fighter_set_nvda_logger(_GLOBAL_NATIVE_LOG_CALLBACK)
             self.loaded = True
             write_persistent_log("[FIGHTER-BRIDGE:SUCCESS] ⚔️ Level 100 Sacred Rust Core loaded into memory!")
@@ -131,6 +132,13 @@ class FighterNativeBridge:
         except Exception as e:
             write_persistent_log(f"[FIGHTER-BRIDGE:ERROR] Text shield failed: {e}")
         return None
+
+    def record_shielding(self, count=1, bytes_shielded=50000):
+        if self.loaded and self._dll:
+            try:
+                self._dll.fighter_record_shielding(c_uint64(count), c_uint64(bytes_shielded))
+            except Exception:
+                pass
 
     def purge_memory(self) -> int:
         if self.loaded and self._dll:
@@ -173,32 +181,29 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         dll_path = next((p for p in dll_candidates if os.path.exists(p)), dll_candidates[0])
         self.daemon_path = next((p for p in daemon_candidates if os.path.exists(p)), daemon_candidates[0])
 
-        # 1. Initialize Rust Native Bridge
         self.bridge = FighterNativeBridge(dll_path)
         if self.bridge.loaded:
             self.bridge.equip_armor()
 
-        # 2. Summon the Shadow Beast Daemon (Single Instance Protected)
         self.daemon_proc = None
         self._summon_shadow_beast()
 
-        # 3. Hook Frontline Event Gatekeeper (Stops Terminal COM Freezes & Storms)
+        # Terminal Burst Tracking
         self._terminal_event_timestamps = []
+        self._last_event_time = 0.0
+        self._consecutive_fast_events = 0
         self._hook_event_gatekeeper()
 
-        # 4. Hook Speech Engine
         self._original_speak = speech.speak
         self._hook_speech_engine()
 
-        # 5. Start Telepathic Chatter Worker (Completely independent background thread)
         self._patrol_active = True
         self._patrol_thread = threading.Thread(target=self._telepathic_chatter_worker, daemon=True)
         self._patrol_thread.start()
 
-        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! UIA Gatekeeper & Beast Daemon Active!")
+        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! Smart Adaptive Burst Gatekeeper Active!")
 
     def _summon_shadow_beast(self):
-        """Summons the immortal out-of-process daemon (safe against duplicate spawns via Mutex)."""
         if not os.path.exists(self.daemon_path):
             write_persistent_log(f"[NVDA-FIGHTER:DAEMON] Shadow beast binary not found at {self.daemon_path}")
             return
@@ -221,15 +226,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
     def _hook_event_gatekeeper(self):
         """
-        THE FRONTLINE GATEKEEPER:
-        Aggressively intercepts terminal/console events BEFORE out-of-process COM calls.
+        SMART ADAPTIVE BURST GATEKEEPER:
+        Distinguishes natural user typing (30ms - 500ms intervals) and smooth terminal output (apt-get)
+        from synthetic 0ms - 5ms machine text bombs (>100 events/sec) that lock Windows COM.
         """
         self._original_queueEvent = eventHandler.queueEvent
         original_queue = self._original_queueEvent
-        timestamps = self._terminal_event_timestamps
 
         def fighter_queue_event(eventName, obj, *args, **kwargs):
             try:
+                # Target text changes and live region updates
                 if eventName in ("textChange", "liveRegionChanged", "caret", "valueChange"):
                     wClass = getattr(obj, "windowClassName", "")
                     appModule = getattr(obj, "appModule", None)
@@ -243,25 +249,33 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
                     if is_terminal:
                         now = time.monotonic()
-                        # Prune events older than 0.5s cleanly
-                        self._terminal_event_timestamps = [t for t in self._terminal_event_timestamps if now - t <= 0.5]
-                        self._terminal_event_timestamps.append(now)
+                        delta = now - self._last_event_time
+                        self._last_event_time = now
 
-                        # If more than 5 terminal events arrive in 0.5s: DROP THEM!
-                        if len(self._terminal_event_timestamps) > 5:
-                            if len(self._terminal_event_timestamps) == 6:
+                        # If delta is < 6 milliseconds (0.006s), it is an inhuman machine blast!
+                        if delta < 0.006:
+                            self._consecutive_fast_events += 1
+                        else:
+                            # Natural human typing or normal SSH flow: reset streak!
+                            self._consecutive_fast_events = max(0, self._consecutive_fast_events - 1)
+
+                        # If a storm of 25 consecutive machine-speed events (<6ms each) is pouring in:
+                        if self._consecutive_fast_events > 25:
+                            # Discard the machine dump!
+                            if self._consecutive_fast_events == 26:
                                 write_persistent_log(
-                                    f"[GATEKEEPER] 🛡️ Terminal storm detected from {appName or wClass}! "
-                                    "Disarming out-of-process COM calls to prevent freeze!"
+                                    f"[GATEKEEPER] 🛡️ Machine burst detected from {appName or wClass} (<6ms spacing)! "
+                                    "Disarming toxic COM loop while preserving user input!"
                                 )
-                            return  # Discard event immediately!
+                                self.bridge.record_shielding(1, 40000)
+                            return
             except Exception as e:
                 write_persistent_log(f"[GATEKEEPER:ERROR] {e}")
 
             return original_queue(eventName, obj, *args, **kwargs)
 
         eventHandler.queueEvent = fighter_queue_event
-        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ UIA Event Gatekeeper active against terminal COM storms!")
+        write_persistent_log("[NVDA-FIGHTER:GATEKEEPER] 🛡️ Smart Adaptive Burst Gatekeeper active (<6ms spacing check)!")
 
     def _hook_speech_engine(self):
         fighter_bridge = self.bridge
@@ -292,7 +306,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         speech.speak = fighter_guarded_speak
 
     def _telepathic_chatter_worker(self):
-        """Dedicated background chatter & RAM maintenance (runs independently of speech)."""
         pulse_count = 0
         while self._patrol_active:
             try:
@@ -302,13 +315,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
                 pulse_count += 1
 
-                # Every 30s, do garbage collection and working set trim
                 if pulse_count % 30 == 0:
                     gc.collect(2)
                     if self.bridge.loaded:
                         self.bridge.purge_memory()
 
-                # Send PULSE to the Shadow Beast daemon
                 if os.path.exists(SACRED_PIPE_NAME):
                     try:
                         handle = ctypes.windll.kernel32.CreateFileW(
@@ -391,7 +402,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             f"NVDA Fighter Level 100 Status: HP is {hp} out of 9999. "
             f"Villainous dumps vanquished: {kills}. "
             f"Total bytes shielded: {kb_shielded} kilobytes. "
-            f"Status: Divine Titan Armor Active. UIA Gatekeeper Armed!"
+            f"Status: Divine Titan Armor Active. Smart Adaptive Gatekeeper Armed!"
         )
         ui.message(msg)
 
