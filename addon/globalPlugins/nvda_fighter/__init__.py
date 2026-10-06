@@ -190,15 +190,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         self._original_speak = speech.speak
         self._hook_speech_engine()
 
-        # 5. Start Telepathic Chatter & Main-Thread Pulse Worker
+        # 5. Start Telepathic Chatter Worker (Completely independent background thread)
         self._patrol_active = True
         self._patrol_thread = threading.Thread(target=self._telepathic_chatter_worker, daemon=True)
         self._patrol_thread.start()
 
-        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! UIA Gatekeeper & Coma Watchdog Armed!")
+        write_persistent_log("[NVDA-FIGHTER:READY] 🛡️ NVDA Fighter standing guard! UIA Gatekeeper & Beast Daemon Active!")
 
     def _summon_shadow_beast(self):
-        """Summons the immortal out-of-process daemon (safe against duplicate spawns)."""
+        """Summons the immortal out-of-process daemon (safe against duplicate spawns via Mutex)."""
         if not os.path.exists(self.daemon_path):
             write_persistent_log(f"[NVDA-FIGHTER:DAEMON] Shadow beast binary not found at {self.daemon_path}")
             return
@@ -210,7 +210,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
             DETACHED_PROCESS = 0x00000008
             CREATE_NO_WINDOW = 0x08000000
 
-            # Pass log file path as 4th argument so daemon writes to the exact same log file!
             self.daemon_proc = subprocess.Popen(
                 [self.daemon_path, my_pid, nvda_exe, FIGHTER_LOG_FILE],
                 creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
@@ -231,9 +230,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         def fighter_queue_event(eventName, obj, *args, **kwargs):
             try:
-                # Any text or caret event from console / terminal
                 if eventName in ("textChange", "liveRegionChanged", "caret", "valueChange"):
-                    # Check window class or process name without blocking COM calls
                     wClass = getattr(obj, "windowClassName", "")
                     appModule = getattr(obj, "appModule", None)
                     appName = getattr(appModule, "appName", "") if appModule else ""
@@ -246,7 +243,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
                     if is_terminal:
                         now = time.monotonic()
-                        # Keep events from the last 0.5s
                         del timestamps[:[i for i, t in enumerate(timestamps) if now - t <= 0.5] or len(timestamps)]
                         timestamps.append(now)
 
@@ -295,6 +291,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         speech.speak = fighter_guarded_speak
 
     def _telepathic_chatter_worker(self):
+        """Dedicated background chatter & RAM maintenance (runs independently of speech)."""
         pulse_count = 0
         while self._patrol_active:
             try:
@@ -304,6 +301,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
                 pulse_count += 1
 
+                # Every 30s, do garbage collection and working set trim
                 if pulse_count % 30 == 0:
                     gc.collect(2)
                     if self.bridge.loaded:

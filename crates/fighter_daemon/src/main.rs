@@ -4,17 +4,18 @@
 //! 
 //! "I am the Shadow Beast that lurks in the background realm. I hold the life-thread
 //! of NVDA in my razor claws. If NVDA bids me farewell with honor, I sleep.
-//! BUT IF ANY COWARDLY VILLAIN CAUSES A COM COMA OR FREEZES NVDA FOR > 12 SECONDS,
-//! OR KILLS NVDA WITHOUT A WORD...
-//! I SHALL ROAR, SLAY THE FROZEN COMA PROCESS, SUMMON THE RESURRECTION RITUAL (100x),
-//! AND REVIVE NVDA BEFORE THE GODS THEMSELVES CAN NOTICE!"
+//! BUT IF ANY COWARDLY VILLAIN OR CRASH DARE STRIKE DOWN NVDA'S PROCESS...
+//! I SHALL ROAR, SUMMON THE RESURRECTION RITUAL (100x), AND REVIVE NVDA BEFORE
+//! THE GODS THEMSELVES CAN NOTICE!"
 //! 
 //! Class: ELITE SHADOW NECROMANCER (Level 100)
-//! Features:
-//! 1. Single Instance Protection: Win32 Named Mutex `Global\NVDA_FIGHTER_BEAST_MUTEX`.
-//! 2. Persistent Battle Logging: Appends to `fighter_battle.log` so crash history is never wiped!
-//! 3. Coma Watchdog: 12-second threshold with 15-second startup grace period.
-//! 4. Process Death Watchdog: Immediate revival if NVDA terminates without goodbye.
+//! Core Principles:
+//! 1. ZERO FALSE RESTARTS: No arbitrary timer killing NVDA! If user reads for 1 hour,
+//!    speech is speaking, or a long task runs, NVDA is NEVER killed.
+//! 2. TRUE PROCESS DEATH WATCHDOG: Holds `OpenProcess(SYNCHRONIZE)` on NVDA PID.
+//!    Only revives if NVDA's process actually terminates (crashes / killed) without goodbye.
+//! 3. SINGLE INSTANCE PROTECTION: Global Win32 Mutex prevents duplicate daemons.
+//! 4. PERSISTENT BATTLE LOGGING: Preserves all history across restarts in `fighter_battle.log`.
 //! ==============================================================================
 
 use std::env;
@@ -40,10 +41,6 @@ const MUTEX_NAME: &str = r"Global\NVDA_FIGHTER_BEAST_MUTEX";
 // Win32 Constants
 const PIPE_ACCESS_DUPLEX_CONST: u32 = 0x00000003;
 const SYNCHRONIZE_CONST: u32 = 0x00100000;
-const PROCESS_TERMINATE_CONST: u32 = 0x00000001;
-
-// Generous 12-second threshold so heavy tasks don't cause false restarts
-const MAX_COMA_FREEZE_SECONDS: u64 = 12;
 
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -58,7 +55,6 @@ static BANTER_PHRASES: &[&str] = &[
     "Any villain tries to freeze NVDA, I strike from the shadows!",
 ];
 
-/// Persistent Battle Logger: writes to log file and console
 fn battle_log(log_path: &str, message: &str) {
     let now = chrono_fallback_timestamp();
     let line = format!("[{}] {}\n", now, message);
@@ -147,21 +143,17 @@ fn main() {
     battle_log(&log_file_path, &format!("⚔️ Binding Soul to NVDA PID: {}", nvda_pid));
     battle_log(&log_file_path, &format!("🏰 Sacred Sanctuary Path: {}", nvda_exe_path));
     battle_log(&log_file_path, &format!("📜 Persistent Battle Log: {}", log_file_path));
-    battle_log(&log_file_path, &format!("⏱️ Coma Timeout: {}s max freeze before emergency mercy-kill & revival", MAX_COMA_FREEZE_SECONDS));
+    battle_log(&log_file_path, "🛡️ Policy: ZERO FALSE RESTARTS! Only revives on genuine process death / assassination.");
     battle_log(&log_file_path, "==================================================================");
 
     let clean_exit_received = Arc::new(AtomicBool::new(false));
     let clean_exit_clone = clean_exit_received.clone();
     let heartbeat_counter = Arc::new(AtomicU64::new(0));
     let heartbeat_clone = heartbeat_counter.clone();
-
-    let last_pulse_instant = Arc::new(parking_lot_instant::MonotonicPulse::new());
-    let last_pulse_clone = last_pulse_instant.clone();
-
     let log_for_pipe = log_file_path.clone();
 
     // -----------------------------------------------------------------------
-    // THREAD 1: TWO-WAY SACRED TELEPATHIC PIPE (Banter & Heartbeat)
+    // THREAD: TWO-WAY SACRED TELEPATHIC PIPE (Banter & Handshake)
     // -----------------------------------------------------------------------
     thread::spawn(move || {
         let pipe_wide = to_wide(PIPE_NAME);
@@ -210,8 +202,6 @@ fn main() {
                             unsafe { CloseHandle(pipe_handle); }
                             return;
                         } else if msg.starts_with("PULSE:") {
-                            last_pulse_clone.ping();
-
                             let count = heartbeat_clone.fetch_add(1, Ordering::Relaxed);
                             let banter = BANTER_PHRASES[count as usize % BANTER_PHRASES.len()];
                             
@@ -240,47 +230,6 @@ fn main() {
     });
 
     // -----------------------------------------------------------------------
-    // THREAD 2: COMA PATROL (Deadlock & COM Freeze Watchdog)
-    // -----------------------------------------------------------------------
-    let exe_path_for_coma = nvda_exe_path.clone();
-    let clean_exit_for_coma = clean_exit_received.clone();
-    let last_pulse_for_coma = last_pulse_instant.clone();
-    let log_for_coma = log_file_path.clone();
-
-    thread::spawn(move || {
-        // 15-second initial grace period to allow NVDA startup
-        thread::sleep(Duration::from_secs(15));
-
-        loop {
-            thread::sleep(Duration::from_millis(500));
-
-            if clean_exit_for_coma.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let elapsed_secs = last_pulse_for_coma.elapsed_secs();
-            if elapsed_secs >= MAX_COMA_FREEZE_SECONDS {
-                battle_log(&log_for_coma, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                battle_log(&log_for_coma, &format!("🚨 [BEAST-DAEMON:COMA-DETECTED] NVDA MAIN THREAD FROZEN FOR {} SECONDS!", elapsed_secs));
-                battle_log(&log_for_coma, &format!("💀 [BEAST-DAEMON:MERCY-KILL] Terminating hung PID {} to break catastrophic COM freeze...", nvda_pid));
-                battle_log(&log_for_coma, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-
-                unsafe {
-                    let kill_handle = OpenProcess(PROCESS_TERMINATE_CONST, 0, nvda_pid);
-                    if kill_handle != std::ptr::null_mut() {
-                        TerminateProcess(kill_handle, 1);
-                        CloseHandle(kill_handle);
-                    }
-                }
-
-                revive_nvda(&log_for_coma, &exe_path_for_coma);
-                thread::sleep(Duration::from_secs(5));
-                break;
-            }
-        }
-    });
-
-    // -----------------------------------------------------------------------
     // MAIN THREAD: PROCESS DEATH MONITOR
     // -----------------------------------------------------------------------
     let process_handle = unsafe {
@@ -298,6 +247,7 @@ fn main() {
 
     battle_log(&log_file_path, "[🐺 BEAST-DAEMON:PATROL] Soul-link forged! Standing eternal guard over NVDA...");
 
+    // Blocks peacefully until NVDA's process actually terminates
     unsafe {
         WaitForSingleObject(process_handle, INFINITE);
         CloseHandle(process_handle);
@@ -311,43 +261,11 @@ fn main() {
         return;
     }
 
+    // Process truly vanished / was killed without saying goodbye!
     battle_log(&log_file_path, "💥 [🐺 BEAST-DAEMON:PANIC] OH MY GOD! OH NO! NVDA VANISHED WITHOUT SAYING GOODBYE!");
     battle_log(&log_file_path, "😭 [🐺 BEAST-DAEMON:SORROW] 'Forgive me, ancient ancestors! I could not prevent the blow!'");
     revive_nvda(&log_file_path, &nvda_exe_path);
 
     unsafe { CloseHandle(mutex_handle); }
     thread::sleep(Duration::from_millis(1500));
-}
-
-mod parking_lot_instant {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
-
-    pub struct MonotonicPulse {
-        start: Instant,
-        last_ms: AtomicU64,
-    }
-
-    impl MonotonicPulse {
-        pub fn new() -> Self {
-            Self {
-                start: Instant::now(),
-                last_ms: AtomicU64::new(0),
-            }
-        }
-
-        pub fn ping(&self) {
-            let ms = self.start.elapsed().as_millis() as u64;
-            self.last_ms.store(ms, Ordering::SeqCst);
-        }
-
-        pub fn elapsed_secs(&self) -> u64 {
-            let now_ms = self.start.elapsed().as_millis() as u64;
-            let last = self.last_ms.load(Ordering::SeqCst);
-            if last == 0 {
-                return 0;
-            }
-            (now_ms.saturating_sub(last)) / 1000
-        }
-    }
 }
