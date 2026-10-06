@@ -240,25 +240,36 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
         def fighter_queue_event(eventName, obj, *args, **kwargs):
             try:
-                # Keystrokes, caret navigation, focus changes, selection changes: USER INPUT!
+                # User typing & navigation ALWAYS PASS!
                 is_user_input = eventName in ("caret", "gainFocus", "typedCharacter", "nameChange")
 
-                wClass = getattr(obj, "windowClassName", "")
-                appModule = getattr(obj, "appModule", None)
-                appName = getattr(appModule, "appName", "") if appModule else ""
+                if not is_user_input:
+                    # Robustly check window class and app name
+                    wClass = ""
+                    try:
+                        wClass = str(getattr(obj, "windowClassName", "") or "")
+                    except Exception:
+                        pass
 
-                is_terminal = (
-                    wClass in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS")
-                    or "Terminal" in wClass
-                    or appName in ("cmd", "powershell", "windowsterminal", "conhost")
-                )
+                    appName = ""
+                    try:
+                        appModule = getattr(obj, "appModule", None)
+                        if appModule:
+                            appName = str(getattr(appModule, "appName", "") or "")
+                    except Exception:
+                        pass
 
-                if is_terminal and not is_user_input:
-                    # Inquire Native Rust Token Bucket: Allow or Drop?
-                    if not native_bridge.should_allow_event(False, True):
-                        return  # Machine dump discarded in 15 nanoseconds!
-            except Exception:
-                pass
+                    is_terminal = (
+                        wClass in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS")
+                        or "terminal" in wClass.lower()
+                        or appName.lower() in ("cmd", "powershell", "windowsterminal", "conhost")
+                    )
+
+                    if is_terminal:
+                        if not native_bridge.should_allow_event(False, True):
+                            return  # Native Rust Token Bucket dropped flood!
+            except Exception as e:
+                write_persistent_log(f"[GATEKEEPER:EXCEPTION] {e}")
 
             return original_queue(eventName, obj, *args, **kwargs)
 
